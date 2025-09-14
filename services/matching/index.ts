@@ -1,0 +1,1 @@
+export { MatchingAlgorithm } from './algorithm';
