@@ -1,0 +1,318 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  DELETED
+}
+
+enum LanguageLevel {
+  A1
+  A2
+  B1
+  B2
+  C1
+  C2
+}
+
+enum PairStatus {
+  PENDING
+  ACTIVE
+  SILENT
+  CLOSED
+}
+
+enum MessageType {
+  TEXT
+  VOICE
+  SYSTEM
+}
+
+enum SessionMode {
+  TEXT
+  AUDIO
+  VIDEO
+  MIXED
+}
+
+enum SafetyEventType {
+  CONTACT_SHARE_ATTEMPT
+  INAPPROPRIATE_CONTENT
+  HARASSMENT
+  SCAM_ATTEMPT
+  OTHER
+}
+
+enum SafetyEventSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum SafetyAction {
+  WARNING
+  MESSAGE_BLOCKED
+  RATE_LIMITED
+  BANNED
+}
+
+model User {
+  id                String         @id @default(uuid())
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  ageVerified18Plus Boolean        @default(false)
+  pseudonym         String         @unique
+  realName          String?
+  realNameVisible   Boolean        @default(false)
+  email             String         @unique
+  hashedPassword    String
+  locale            String         @default("en")
+  country           String?
+  status            UserStatus     @default(ACTIVE)
+  lastActiveAt      DateTime?
+
+  profile           LanguageProfile?
+  availability      Availability?
+  interests         Interests?
+  qualification     Qualification?
+
+  pairsAsUserA      Pair[]         @relation("UserA")
+  pairsAsUserB      Pair[]         @relation("UserB")
+  sentMessages      Message[]
+  sessions          SessionParticipant[]
+  safetyEvents      SafetyEvent[]
+  matchRequests     MatchRequest[] @relation("Requester")
+  matchResponses    MatchRequest[] @relation("Requested")
+
+  @@index([email])
+  @@index([status])
+  @@index([lastActiveAt])
+}
+
+model LanguageProfile {
+  id                String         @id @default(uuid())
+  userId            String         @unique
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  nativeLanguages   String[]       // Array of language codes
+  fluentLanguages   String[]       // Max 2
+
+  learningLanguage  String
+  learningLevel     LanguageLevel
+  levelFromTest     Boolean        @default(false)
+  testCompletedAt   DateTime?
+
+  motives           String[]       // travel, study, work, culture, exam, friendly
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@index([learningLanguage])
+  @@index([nativeLanguages])
+}
+
+model Availability {
+  id                String         @id @default(uuid())
+  userId            String         @unique
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  weeklySlots       Json           // Array of {day, startTime, endTime} in UTC
+  timezone          String
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+}
+
+model Interests {
+  id                String         @id @default(uuid())
+  userId            String         @unique
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tags              String[]
+  customTags        String[]
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@index([tags])
+}
+
+model MatchRequest {
+  id                String         @id @default(uuid())
+  requesterId       String
+  requester         User           @relation("Requester", fields: [requesterId], references: [id])
+  requestedId       String
+  requested         User           @relation("Requested", fields: [requestedId], references: [id])
+
+  message           String?
+  status            String         @default("pending") // pending, accepted, rejected, expired
+
+  createdAt         DateTime       @default(now())
+  respondedAt       DateTime?
+  expiresAt         DateTime
+
+  @@unique([requesterId, requestedId])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+model Pair {
+  id                String         @id @default(uuid())
+  userAId           String
+  userA             User           @relation("UserA", fields: [userAId], references: [id])
+  userBId           String
+  userB             User           @relation("UserB", fields: [userBId], references: [id])
+
+  status            PairStatus     @default(ACTIVE)
+  startedAt         DateTime       @default(now())
+  lastActivityAt    DateTime       @default(now())
+  silentSince       DateTime?
+  closedAt          DateTime?
+
+  minutesTotal      Int            @default(0)
+  turnsTotal        Int            @default(0)
+  languageBalance   Json?          // {userALanguage: %, userBLanguage: %}
+
+  realNamesRevealed Boolean        @default(false)
+  realNameRevealedAt DateTime?
+
+  messages          Message[]
+  sessions          Session[]
+
+  @@unique([userAId, userBId])
+  @@index([status])
+  @@index([lastActivityAt])
+}
+
+model Message {
+  id                String         @id @default(uuid())
+  pairId            String
+  pair              Pair           @relation(fields: [pairId], references: [id], onDelete: Cascade)
+  senderId          String
+  sender            User           @relation(fields: [senderId], references: [id])
+
+  type              MessageType
+  body              String?
+  voiceUrl          String?
+  transcript        String?
+  duration          Int?           // For voice messages, in seconds
+
+  redactions        Json?          // Array of redacted content
+  safetyFlags       Json?          // Array of safety concerns
+  quarantined       Boolean        @default(false)
+
+  createdAt         DateTime       @default(now())
+  editedAt          DateTime?
+  deletedAt         DateTime?
+
+  @@index([pairId, createdAt])
+  @@index([senderId])
+}
+
+model Session {
+  id                String         @id @default(uuid())
+  pairId            String
+  pair              Pair           @relation(fields: [pairId], references: [id], onDelete: Cascade)
+
+  startedAt         DateTime       @default(now())
+  endedAt           DateTime?
+  mode              SessionMode
+
+  topicsCovered     String[]       // Array of topic IDs
+  summary           Summary?
+
+  participants      SessionParticipant[]
+
+  @@index([pairId])
+  @@index([startedAt])
+}
+
+model SessionParticipant {
+  id                String         @id @default(uuid())
+  sessionId         String
+  session           Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId            String
+  user              User           @relation(fields: [userId], references: [id])
+
+  joinedAt          DateTime       @default(now())
+  leftAt            DateTime?
+  speakingTime      Int            @default(0) // In seconds
+  messageCount      Int            @default(0)
+
+  @@unique([sessionId, userId])
+}
+
+model Qualification {
+  id                String         @id @default(uuid())
+  userId            String         @unique
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  consistencyWeeks  Int            @default(0)
+  depthScore        Float          @default(0)
+  reciprocityScore  Float          @default(0)
+  reliabilityScore  Float          @default(0)
+  onPlatformRate    Float          @default(100)
+  longevityWeeks    Int            @default(0)
+
+  updatedAt         DateTime       @updatedAt
+}
+
+model SafetyEvent {
+  id                String         @id @default(uuid())
+  userId            String
+  user              User           @relation(fields: [userId], references: [id])
+
+  type              SafetyEventType
+  severity          SafetyEventSeverity
+  actionTaken       SafetyAction
+
+  details           Json?
+  messageId         String?
+
+  occurredAt        DateTime       @default(now())
+  resolvedAt        DateTime?
+  moderatorNotes    String?
+
+  @@index([userId])
+  @@index([type])
+  @@index([severity])
+  @@index([occurredAt])
+}
+
+model Topic {
+  id                String         @id @default(uuid())
+  locale            String
+  tags              String[]
+  text              String
+  difficulty        LanguageLevel
+
+  createdAt         DateTime       @default(now())
+  usageCount        Int            @default(0)
+
+  @@index([locale])
+  @@index([tags])
+  @@index([difficulty])
+}
+
+model Summary {
+  id                String         @id @default(uuid())
+  sessionId         String         @unique
+  session           Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  newWords          Json           // Array of {word, definition, context}
+  commonMistakes    Json           // Array of {mistake, correction, explanation}
+  followUpTask      String?
+
+  generatedAt       DateTime       @default(now())
+
+  @@index([sessionId])
+}

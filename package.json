@@ -1,0 +1,30 @@
+{
+  "name": "speakpoly",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Language exchange platform for real conversations with native speakers",
+  "workspaces": [
+    "web",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=web",
+    "build": "npm run build --workspace=web",
+    "start": "npm run start --workspace=web",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "db:generate": "npm run generate --workspace=@speakpoly/database",
+    "db:push": "npm run push --workspace=@speakpoly/database",
+    "db:migrate": "npm run migrate --workspace=@speakpoly/database",
+    "db:studio": "npm run studio --workspace=@speakpoly/database"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
