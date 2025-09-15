@@ -9,6 +9,7 @@ const { detectAndRedactContactInfo } = require('@speakpoly/utils');
 const { safetyService } = require('../services/safety');
 const { moderatorService } = require('../services/safety/moderator');
 const { aiService } = require('../services/ai');
+const { analyticsService } = require('../services/analytics');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
@@ -224,6 +225,13 @@ app.prepare().then(() => {
           },
         });
 
+        // Track analytics
+        await analyticsService.trackActivity(socket.data.userId, 'message_sent', {
+          pairId,
+          messageType: type,
+          hasRedactions
+        });
+
       } catch (error) {
         console.error('Send message error:', error);
         socket.emit('error', 'Failed to send message');
@@ -265,6 +273,12 @@ app.prepare().then(() => {
           startedBy: socket.data.userId,
         });
 
+        // Track analytics
+        await analyticsService.trackActivity(socket.data.userId, 'session_started', {
+          pairId,
+          sessionId: session.id
+        });
+
       } catch (error) {
         console.error('Start session error:', error);
       }
@@ -280,6 +294,12 @@ app.prepare().then(() => {
         socket.to(`pair:${data.pairId}`).emit('session-ended', {
           sessionId: data.sessionId,
           endedBy: socket.data.userId,
+        });
+
+        // Track analytics
+        await analyticsService.trackActivity(socket.data.userId, 'session_ended', {
+          pairId: data.pairId,
+          sessionId: data.sessionId
         });
 
       } catch (error) {
@@ -324,6 +344,14 @@ app.prepare().then(() => {
           pairId,
           language,
           level
+        });
+
+        // Track analytics
+        await analyticsService.trackActivity(socket.data.userId, 'topic_viewed', {
+          pairId,
+          language,
+          level,
+          topicCount: topics.length
         });
 
       } catch (error) {
@@ -483,6 +511,13 @@ app.prepare().then(() => {
         io.to(`pair:${session.pairId}`).emit('summary-ready', {
           sessionId,
           summary: result.summary,
+          summaryId: savedSummary.id
+        });
+
+        // Track analytics
+        await analyticsService.trackActivity(socket.data.userId, 'summary_generated', {
+          sessionId,
+          pairId: session.pairId,
           summaryId: savedSummary.id
         });
 

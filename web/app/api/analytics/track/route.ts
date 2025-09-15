@@ -1,34 +1,53 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
+import { analyticsService } from '../../../../services/analytics';
 
-// Simple analytics tracking endpoint
-// In production, this would integrate with a real analytics service
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    const body = await request.json();
-    const { event, data } = body;
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
-    // Log analytics event (in production, send to analytics service)
-    console.log('Analytics Event:', {
+    const { event, metadata } = await request.json();
+
+    if (!event) {
+      return NextResponse.json({ error: 'Event type is required' }, { status: 400 });
+    }
+
+    // Validate event types
+    const validEvents = [
+      'session_started',
+      'session_ended',
+      'message_sent',
+      'topic_viewed',
+      'summary_generated',
+      'pair_created',
+      'profile_updated',
+      'settings_changed',
+      'dashboard_viewed',
+      'matches_viewed'
+    ];
+
+    if (!validEvents.includes(event)) {
+      return NextResponse.json({ error: 'Invalid event type' }, { status: 400 });
+    }
+
+    await analyticsService.trackActivity(session.user.id, event, metadata);
+
+    return NextResponse.json({
+      success: true,
       event,
-      userId: session?.user?.id || 'anonymous',
-      data,
-      timestamp: new Date().toISOString(),
+      userId: session.user.id,
+      timestamp: new Date().toISOString()
     });
 
-    // Here you would typically send to:
-    // - Google Analytics
-    // - Mixpanel
-    // - Amplitude
-    // - PostHog
-    // - Custom analytics database
-
-    return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Analytics tracking error:', error);
-    // Don't return error to client - analytics should fail silently
-    return NextResponse.json({ success: false });
+    console.error('Activity tracking error:', error);
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    );
   }
 }
