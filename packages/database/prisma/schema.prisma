@@ -80,6 +80,14 @@ model User {
   status            UserStatus     @default(ACTIVE)
   lastActiveAt      DateTime?
 
+  // Safety and moderation fields
+  safetyScore       Int            @default(100)
+  warningCount      Int            @default(0)
+  lastWarningAt     DateTime?
+  suspendedUntil    DateTime?
+  suspensionReason  String?
+  role              String         @default("USER") // USER, MODERATOR, ADMIN
+
   profile           LanguageProfile?
   availability      Availability?
   interests         Interests?
@@ -226,6 +234,8 @@ model Session {
   startedAt         DateTime       @default(now())
   endedAt           DateTime?
   mode              SessionMode
+  status            String         @default("ACTIVE") // ACTIVE, ENDED
+  endReason         String?        // COMPLETED, USER_LEFT, USER_SANCTIONED, etc.
 
   topicsCovered     String[]       // Array of topic IDs
   summary           Summary?
@@ -267,25 +277,32 @@ model Qualification {
 }
 
 model SafetyEvent {
-  id                String         @id @default(uuid())
-  userId            String
-  user              User           @relation(fields: [userId], references: [id])
+  id                   String         @id @default(uuid())
+  userId               String
+  user                 User           @relation(fields: [userId], references: [id])
+  pairId               String?
+  messageId            String?
 
-  type              SafetyEventType
-  severity          SafetyEventSeverity
-  actionTaken       SafetyAction
+  eventType            String         // Specific violation type like CONTACT_EMAIL, PROFANITY_SEXUAL, etc.
+  severity             String         // LOW, MEDIUM, HIGH, CRITICAL
+  content              String         // Original content that triggered the event
+  processedContent     String?        // Content after processing/redaction
+  violations           String         // JSON string of SafetyViolation array
+  metadata             String         // JSON string with confidence, API info, etc.
 
-  details           Json?
-  messageId         String?
+  requiresHumanReview  Boolean        @default(false)
+  humanReviewedAt      DateTime?
+  humanReviewedBy      String?
+  humanReviewAction    String?        // APPROVED, ESCALATED, APPLY_SANCTION
+  humanReviewNotes     String?
 
-  occurredAt        DateTime       @default(now())
-  resolvedAt        DateTime?
-  moderatorNotes    String?
+  createdAt            DateTime       @default(now())
 
   @@index([userId])
-  @@index([type])
+  @@index([eventType])
   @@index([severity])
-  @@index([occurredAt])
+  @@index([requiresHumanReview])
+  @@index([createdAt])
 }
 
 model Topic {

@@ -6,6 +6,9 @@ const { getServerSession } = require('next-auth');
 const { authOptions } = require('./lib/auth');
 const { PrismaClient } = require('@prisma/client');
 const { detectAndRedactContactInfo } = require('@speakpoly/utils');
+const { safetyService } = require('../services/safety');
+const { moderatorService } = require('../services/safety/moderator');
+const { aiService } = require('../services/ai');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
@@ -118,31 +121,64 @@ app.prepare().then(() => {
         let redactions = [];
         let hasRedactions = false;
 
-        // Safety check for text messages
+        // Comprehensive safety check for text messages
         if (type === 'text' && content) {
-          const safetyResult = detectAndRedactContactInfo(content);
-          processedContent = safetyResult.text;
-          redactions = safetyResult.redactions;
-          hasRedactions = safetyResult.hasRedactions;
+          try {
+            const safetyResult = await safetyService.moderateText(content);
+            processedContent = safetyResult.processedText;
+            redactions = safetyResult.redactionResult.redactions;
+            hasRedactions = safetyResult.redactionResult.hasRedactions;
 
-          // Track safety events if redactions occurred
-          if (hasRedactions) {
-            await prisma.safetyEvent.create({
-              data: {
+            // If content is not safe, block the message
+            if (!safetyResult.safe) {
+              socket.emit('message-blocked', {
+                reason: 'Content violates community guidelines',
+                violations: safetyResult.violations.map(v => ({
+                  type: v.type,
+                  severity: v.severity,
+                  description: v.description
+                }))
+              });
+
+              // Record safety event and apply sanctions
+              const actions = await moderatorService.recordSafetyEvent({
                 userId: socket.data.userId,
-                type: 'CONTACT_SHARE_ATTEMPT',
-                severity: 'MEDIUM',
-                actionTaken: 'MESSAGE_BLOCKED',
-                details: { originalContent: content, redactions },
-              },
-            });
+                pairId,
+                content,
+                safetyResult,
+                userAgent: socket.handshake.headers['user-agent'],
+                ipAddress: socket.handshake.address
+              });
 
-            // Notify sender about redaction
-            socket.emit('message-redacted', {
-              originalContent: content,
-              redactedContent: processedContent,
-              redactions,
-            });
+              // Notify user of any auto-applied sanctions
+              if (actions.length > 0) {
+                actions.forEach(action => {
+                  socket.emit('moderation-action', {
+                    type: action.type,
+                    duration: action.duration,
+                    reason: action.reason
+                  });
+                });
+              }
+
+              return; // Block message completely
+            }
+
+            // Notify sender about redactions if any occurred
+            if (hasRedactions) {
+              socket.emit('message-redacted', {
+                originalContent: content,
+                redactedContent: processedContent,
+                redactions,
+              });
+            }
+          } catch (error) {
+            console.error('Safety check error:', error);
+            // Fallback to basic contact detection if safety service fails
+            const basicSafetyResult = detectAndRedactContactInfo(content);
+            processedContent = basicSafetyResult.text;
+            redactions = basicSafetyResult.redactions;
+            hasRedactions = basicSafetyResult.hasRedactions;
           }
         }
 
@@ -248,6 +284,211 @@ app.prepare().then(() => {
 
       } catch (error) {
         console.error('End session error:', error);
+      }
+    });
+
+    // Handle AI topic requests
+    socket.on('get-topics', async (data) => {
+      try {
+        const { pairId, language, level, count = 3 } = data;
+
+        // Verify user is part of this pair
+        const pair = await prisma.pair.findFirst({
+          where: {
+            id: pairId,
+            OR: [
+              { userAId: socket.data.userId },
+              { userBId: socket.data.userId },
+            ],
+            status: 'ACTIVE',
+          },
+          include: {
+            userA: { include: { interests: true } },
+            userB: { include: { interests: true } }
+          }
+        });
+
+        if (!pair) {
+          socket.emit('error', 'Unauthorized access to pair');
+          return;
+        }
+
+        // Get user interests for personalized topics
+        const currentUser = pair.userA.id === socket.data.userId ? pair.userA : pair.userB;
+        const interests = currentUser.interests?.interests || [];
+
+        const topics = await aiService.getRandomTopics(language, level, count);
+
+        socket.emit('topics-ready', {
+          topics,
+          pairId,
+          language,
+          level
+        });
+
+      } catch (error) {
+        console.error('Get topics error:', error);
+        socket.emit('error', 'Failed to get topics');
+      }
+    });
+
+    // Handle conversation starter requests
+    socket.on('get-conversation-starters', async (pairId) => {
+      try {
+        const pair = await prisma.pair.findFirst({
+          where: {
+            id: pairId,
+            OR: [
+              { userAId: socket.data.userId },
+              { userBId: socket.data.userId },
+            ],
+            status: 'ACTIVE',
+          },
+          include: {
+            userA: {
+              include: {
+                profile: true,
+                interests: true
+              }
+            },
+            userB: {
+              include: {
+                profile: true,
+                interests: true
+              }
+            }
+          }
+        });
+
+        if (!pair) {
+          socket.emit('error', 'Unauthorized access to pair');
+          return;
+        }
+
+        const starters = await aiService.generateContextualStarters(
+          pair.userA,
+          pair.userB,
+          3
+        );
+
+        socket.emit('conversation-starters-ready', {
+          starters,
+          pairId
+        });
+
+      } catch (error) {
+        console.error('Conversation starters error:', error);
+        socket.emit('error', 'Failed to generate conversation starters');
+      }
+    });
+
+    // Handle session summary generation
+    socket.on('generate-summary', async (data) => {
+      try {
+        const { sessionId } = data;
+
+        // Get session with messages and verify user access
+        const session = await prisma.session.findUnique({
+          where: { id: sessionId },
+          include: {
+            pair: {
+              include: {
+                userA: { include: { profile: true } },
+                userB: { include: { profile: true } },
+                messages: {
+                  where: {
+                    type: 'TEXT',
+                    body: { not: null },
+                    deletedAt: null
+                  },
+                  orderBy: { createdAt: 'asc' },
+                  include: { sender: true }
+                }
+              }
+            }
+          }
+        });
+
+        if (!session) {
+          socket.emit('error', 'Session not found');
+          return;
+        }
+
+        // Check if user is participant
+        const isParticipant = session.pair.userA.id === socket.data.userId ||
+                             session.pair.userB.id === socket.data.userId;
+
+        if (!isParticipant) {
+          socket.emit('error', 'Unauthorized access to session');
+          return;
+        }
+
+        // Check if conversation is suitable for analysis
+        if (!aiService.isConversationAnalyzable(session.pair.messages)) {
+          socket.emit('error', 'Conversation too short for meaningful analysis');
+          return;
+        }
+
+        socket.emit('summary-generating', { sessionId });
+
+        // Generate summary (this may take a while)
+        // In a production environment, you might want to queue this job
+        // For now, we'll do it synchronously
+
+        const messages = session.pair.messages.map(msg => ({
+          content: msg.body || '',
+          senderId: msg.senderId,
+          language: msg.senderId === session.pair.userA.id
+            ? session.pair.userA.profile?.nativeLanguages[0] || 'en'
+            : session.pair.userB.profile?.nativeLanguages[0] || 'en',
+          timestamp: msg.createdAt
+        }));
+
+        const participants = [
+          {
+            id: session.pair.userA.id,
+            nativeLanguages: session.pair.userA.profile?.nativeLanguages || ['en'],
+            learningLanguage: session.pair.userA.profile?.learningLanguage || 'en',
+            level: session.pair.userA.profile?.currentLevel || 'A1'
+          },
+          {
+            id: session.pair.userB.id,
+            nativeLanguages: session.pair.userB.profile?.nativeLanguages || ['en'],
+            learningLanguage: session.pair.userB.profile?.learningLanguage || 'en',
+            level: session.pair.userB.profile?.currentLevel || 'A1'
+          }
+        ];
+
+        const startTime = session.startedAt;
+        const endTime = session.endedAt || new Date();
+        const durationMinutes = Math.round((endTime.getTime() - startTime.getTime()) / (1000 * 60));
+
+        const result = await aiService.generateConversationSummary({
+          messages,
+          participants,
+          sessionDuration: durationMinutes
+        });
+
+        // Save summary to database
+        const savedSummary = await prisma.summary.create({
+          data: {
+            sessionId: session.id,
+            newWords: JSON.stringify(result.summary.newWords),
+            commonMistakes: JSON.stringify(result.summary.commonMistakes),
+            followUpTask: result.summary.followUpTask
+          }
+        });
+
+        // Emit to both participants
+        io.to(`pair:${session.pairId}`).emit('summary-ready', {
+          sessionId,
+          summary: result.summary,
+          summaryId: savedSummary.id
+        });
+
+      } catch (error) {
+        console.error('Summary generation error:', error);
+        socket.emit('error', 'Failed to generate summary');
       }
     });
 
