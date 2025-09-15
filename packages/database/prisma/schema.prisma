@@ -65,6 +65,32 @@ enum SafetyAction {
   BANNED
 }
 
+enum NotificationType {
+  WELCOME_BACK
+  SESSION_REMINDER
+  MILESTONE_CELEBRATION
+  STREAK_RECOVERY
+  SKILL_PROGRESS
+  COMMUNITY_HIGHLIGHT
+  REMATCH_REQUEST
+  REMATCH_ACCEPTED
+  REMATCH_DECLINED
+}
+
+enum NotificationStatus {
+  SENT
+  DELIVERED
+  READ
+  DISMISSED
+}
+
+enum RematchStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
 model User {
   id                String         @id @default(uuid())
   createdAt         DateTime       @default(now())
@@ -100,6 +126,9 @@ model User {
   safetyEvents      SafetyEvent[]
   matchRequests     MatchRequest[] @relation("Requester")
   matchResponses    MatchRequest[] @relation("Requested")
+  notifications     Notification[]
+  sentRematches     Rematch[]      @relation("RematchRequester")
+  receivedRematches Rematch[]      @relation("RematchRequested")
 
   @@index([email])
   @@index([status])
@@ -332,4 +361,48 @@ model Summary {
   generatedAt       DateTime       @default(now())
 
   @@index([sessionId])
+}
+
+model Notification {
+  id                String            @id @default(uuid())
+  userId            String
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type              NotificationType
+  title             String
+  message           String
+  data              Json?             // Additional data like rematchId, pairId, etc.
+
+  status            NotificationStatus @default(SENT)
+  sentAt            DateTime          @default(now())
+  deliveredAt       DateTime?
+  readAt            DateTime?
+  dismissedAt       DateTime?
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([sentAt])
+}
+
+model Rematch {
+  id                String            @id @default(uuid())
+  requesterId       String
+  requester         User              @relation("RematchRequester", fields: [requesterId], references: [id])
+  requestedId       String
+  requested         User              @relation("RematchRequested", fields: [requestedId], references: [id])
+
+  originalPairId    String            // Reference to the original pair
+  newPairId         String?           // Reference to the new pair if accepted
+
+  status            RematchStatus     @default(PENDING)
+  message           String?           // Optional message from requester
+
+  createdAt         DateTime          @default(now())
+  respondedAt       DateTime?
+  expiresAt         DateTime          // Expires after 7 days
+
+  @@unique([requesterId, requestedId, originalPairId])
+  @@index([status])
+  @@index([expiresAt])
 }

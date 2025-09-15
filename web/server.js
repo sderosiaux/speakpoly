@@ -10,6 +10,7 @@ const { safetyService } = require('../services/safety');
 const { moderatorService } = require('../services/safety/moderator');
 const { aiService } = require('../services/ai');
 const { analyticsService } = require('../services/analytics');
+const { engagementService } = require('../services/engagement');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
@@ -60,6 +61,9 @@ app.prepare().then(() => {
 
     // Join user to their personal room
     socket.join(`user:${socket.data.userId}`);
+
+    // Track connection time for engagement analysis
+    socket.data.connectTime = Date.now();
 
     // Handle joining a chat pair
     socket.on('join-pair', async (pairId) => {
@@ -527,9 +531,143 @@ app.prepare().then(() => {
       }
     });
 
+    // Handle nudge interactions
+    socket.on('mark-nudge-read', async (nudgeId) => {
+      try {
+        await engagementService.markNudgeAsRead(nudgeId, socket.data.userId);
+        socket.emit('nudge-marked-read', { nudgeId });
+      } catch (error) {
+        console.error('Mark nudge read error:', error);
+        socket.emit('error', 'Failed to mark nudge as read');
+      }
+    });
+
+    // Handle rematch requests
+    socket.on('request-rematch', async (data) => {
+      try {
+        const { partnerId } = data;
+        const result = await engagementService.requestRematch(socket.data.userId, partnerId);
+
+        // Notify the partner
+        io.to(`user:${partnerId}`).emit('rematch-request', {
+          fromUserId: socket.data.userId,
+          rematchId: result.id,
+          status: result.status
+        });
+
+        socket.emit('rematch-requested', {
+          partnerId,
+          rematchId: result.id,
+          status: result.status
+        });
+
+        // Track analytics
+        await analyticsService.trackActivity(socket.data.userId, 'rematch_requested', {
+          partnerId,
+          rematchId: result.id
+        });
+
+      } catch (error) {
+        console.error('Request rematch error:', error);
+        socket.emit('error', 'Failed to request rematch');
+      }
+    });
+
+    // Handle rematch responses
+    socket.on('respond-rematch', async (data) => {
+      try {
+        const { rematchId, accepted } = data;
+        const result = await engagementService.respondToRematch(rematchId, socket.data.userId, accepted);
+
+        // Notify the requester
+        io.to(`user:${result.requesterId}`).emit('rematch-response', {
+          rematchId,
+          accepted,
+          responderId: socket.data.userId,
+          pairId: result.pairId
+        });
+
+        socket.emit('rematch-responded', {
+          rematchId,
+          accepted,
+          pairId: result.pairId
+        });
+
+        // Track analytics
+        await analyticsService.trackActivity(socket.data.userId, 'rematch_responded', {
+          rematchId,
+          accepted,
+          requesterId: result.requesterId
+        });
+
+      } catch (error) {
+        console.error('Respond rematch error:', error);
+        socket.emit('error', 'Failed to respond to rematch');
+      }
+    });
+
+    // Send personalized nudges on connection
+    socket.on('request-nudges', async () => {
+      try {
+        const nudges = await engagementService.getUserNudges(socket.data.userId, {
+          limit: 5,
+          status: 'sent'
+        });
+
+        socket.emit('nudges-ready', {
+          nudges,
+          userId: socket.data.userId
+        });
+
+      } catch (error) {
+        console.error('Request nudges error:', error);
+        socket.emit('error', 'Failed to get nudges');
+      }
+    });
+
+    // Handle session activity tracking for engagement
+    socket.on('track-engagement', async (data) => {
+      try {
+        const { action, metadata } = data;
+
+        await analyticsService.trackActivity(socket.data.userId, action, {
+          ...metadata,
+          timestamp: new Date().toISOString(),
+          socketId: socket.id
+        });
+
+        // Check if user should receive engagement nudges
+        const engagementAnalysis = await engagementService.analyzeUserEngagement(
+          socket.data.userId,
+          'week'
+        );
+
+        // Send nudge if user is at risk and hasn't received one recently
+        if (engagementAnalysis.riskLevel === 'high' && !engagementAnalysis.recentNudges) {
+          await engagementService.sendNudge(
+            socket.data.userId,
+            { type: 'streak_recovery', timing: 'immediate' }
+          );
+        }
+
+      } catch (error) {
+        console.error('Track engagement error:', error);
+      }
+    });
+
     // Handle disconnection
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       console.log('User disconnected:', socket.data.userId);
+
+      // Track disconnect for engagement analysis
+      try {
+        await analyticsService.trackActivity(socket.data.userId, 'user_disconnected', {
+          sessionDuration: Date.now() - socket.data.connectTime,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error('Track disconnect error:', error);
+      }
     });
   });
 
